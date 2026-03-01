@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transient State Rotating Discs Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a2e;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        h1 { margin: 25px 0 5px; font-weight: 400; text-align: center; }
+        p.subtitle { color: #a0a0b0; margin-top: 0; margin-bottom: 15px; }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #16213e;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.6);
+            gap: 15px;
+        }
+        canvas {
+            background-color: #0f3460;
+            border-radius: 8px;
+            box-shadow: inset 0 0 30px rgba(0,0,0,0.6);
+        }
+        #simCanvas { cursor: grab; }
+        #simCanvas:active { cursor: grabbing; }
+        .controls {
+            display: flex; gap: 40px; width: 100%; justify-content: center; flex-wrap: wrap;
+        }
+        .control-group {
+            display: flex; flex-direction: column; align-items: center;
+            background: rgba(255, 255, 255, 0.05); padding: 10px 20px; border-radius: 8px;
+        }
+        label { font-size: 14px; color: #ccc; }
+        input[type="range"] { width: 180px; margin-top: 12px; accent-color: #e94560; }
+        .stats {
+            font-family: 'Courier New', Courier, monospace; font-size: 16px;
+            background: rgba(0,0,0,0.4); padding: 12px 25px; border-radius: 6px;
+            width: 100%; text-align: center; box-sizing: border-box; color: #4df; font-weight: bold;
+        }
+        .legend {
+            display: flex; gap: 20px; font-size: 14px; margin-top: -5px;
+        }
+        .legend span { display: flex; align-items: center; gap: 5px; }
+        .color-box { width: 12px; height: 12px; display: inline-block; border-radius: 2px;}
+    </style>
+</head>
+<body>
+
+    <h1>Coupled Discs Simulation</h1>
+    <p class="subtitle">Physics-Accurate Transient State & Numerical Integration</p>
+
+    <div class="container">
+        <canvas id="simCanvas" width="800" height="400"></canvas>
+        
+        <div class="legend">
+            <span><div class="color-box" style="background: #e94560;"></div> Large Disc Velocity (&Omega;)</span>
+            <span><div class="color-box" style="background: #4df;"></div> Small Disc Velocity (&omega;)</span>
+        </div>
+        <canvas id="graphCanvas" width="800" height="120"></canvas>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="bigOmega">Large Disc Velocity (&Omega;)</label>
+                <input type="range" id="bigOmega" min="-0.15" max="0.15" step="0.005" value="0.05">
+            </div>
+            <div class="control-group">
+                <label for="friction">Friction Coefficient (&mu;)</label>
+                <input type="range" id="friction" min="0.1" max="2.0" step="0.1" value="0.5">
+            </div>
+        </div>
+
+        <div class="stats" id="statsDisplay">
+            &omega;: 0.000 &nbsp;|&nbsp; &Omega;: 0.050
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const graphCanvas = document.getElementById('graphCanvas');
+        const graphCtx = graphCanvas.getContext('2d');
+
+        // Disc State Objects
+        const largeDisc = {
+            x: canvas.width / 2, y: canvas.height / 2, r: 180, angle: 0, omega: 0.05,
+            color1: '#e0e0e0', color2: '#4a4a4a'
+        };
+
+        const smallDisc = {
+            x: 120, y: 120, r: 45, angle: 0, omega: 0,
+            color1: '#ffd700', color2: '#b8860b', isDragging: false
+        };
+
+        // Numerical Integration Points (Area elements of small disc)
+        const integrationPoints = [];
+        const dr = smallDisc.r / 5;
+        for (let rad = dr/2; rad < smallDisc.r; rad += dr) {
+            const circum = 2 * Math.PI * rad;
+            const numPoints = Math.round(circum / dr);
+            for (let i = 0; i < numPoints; i++) {
+                const theta = (i / numPoints) * 2 * Math.PI;
+                integrationPoints.push({ x: rad * Math.cos(theta), y: rad * Math.sin(theta) });
+            }
+        }
+
+        // Graphing history
+        const history = [];
+        const maxHistory = graphCanvas.width;
+
+        // Mouse Events
+        let offsetX = 0, offsetY = 0;
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            if (Math.hypot(mx - smallDisc.x, my - smallDisc.y) < smallDisc.r) {
+                smallDisc.isDragging = true;
+                offsetX = mx - smallDisc.x; offsetY = my - smallDisc.y;
+            }
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            if (smallDisc.isDragging) {
+                const rect = canvas.getBoundingClientRect();
+                smallDisc.x = e.clientX - rect.left - offsetX;
+                smallDisc.y = e.clientY - rect.top - offsetY;
+            }
+        });
+        window.addEventListener('mouseup', () => smallDisc.isDragging = false);
+
+        function drawDisc(ctx, x, y, radius, angle, color1, color2, isLarge) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.shadowColor = 'rgba(0,0,0,0.6)';
+            ctx.shadowBlur = isLarge ? 25 : 12;
+            ctx.shadowOffsetY = isLarge ? 10 : 6;
+            ctx.rotate(angle);
+
+            ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2);
+            let grad = ctx.createRadialGradient(-radius*0.3, -radius*0.3, radius*0.1, 0, 0, radius*1.2);
+            grad.addColorStop(0, color1); grad.addColorStop(1, color2);
+            ctx.fillStyle = grad; ctx.fill();
+
+            ctx.shadowColor = 'transparent';
+            ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, 0, radius - 3, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.stroke();
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            for (let i = 0; i < 6; i++) {
+                ctx.beginPath(); ctx.arc(radius * 0.65, 0, radius * 0.08, 0, Math.PI * 2);
+                ctx.fill(); ctx.rotate(Math.PI / 3);
+            }
+
+            ctx.beginPath(); ctx.arc(0, 0, radius * 0.06, 0, Math.PI * 2);
+            ctx.fillStyle = '#222'; ctx.fill();
+            ctx.lineWidth = 1; ctx.strokeStyle = '#000'; ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawGraph() {
+            graphCtx.clearRect(0, 0, graphCanvas.width, graphCanvas.height);
+            
+            // Grid lines
+            graphCtx.strokeStyle = 'rgba(255,255,255,0.1)';
+            graphCtx.beginPath();
+            graphCtx.moveTo(0, graphCanvas.height/2);
+            graphCtx.lineTo(graphCanvas.width, graphCanvas.height/2);
+            graphCtx.stroke();
+
+            if (history.length === 0) return;
+
+            // Plot Large Disc Omega
+            graphCtx.beginPath();
+            graphCtx.strokeStyle = '#e94560';
+            graphCtx.lineWidth = 2;
+            for (let i = 0; i < history.length; i++) {
+                let y = graphCanvas.height/2 - (history[i].large * 300);
+                if (i === 0) graphCtx.moveTo(i, y); else graphCtx.lineTo(i, y);
+            }
+            graphCtx.stroke();
+
+            // Plot Small Disc Omega
+            graphCtx.beginPath();
+            graphCtx.strokeStyle = '#4df';
+            graphCtx.lineWidth = 2;
+            for (let i = 0; i < history.length; i++) {
+                let y = graphCanvas.height/2 - (history[i].small * 300);
+                if (i === 0) graphCtx.moveTo(i, y); else graphCtx.lineTo(i, y);
+            }
+            graphCtx.stroke();
+        }
+
+        function animate() {
+            largeDisc.omega = parseFloat(document.getElementById('bigOmega').value);
+            const frictionMu = parseFloat(document.getElementById('friction').value);
+
+            largeDisc.angle += largeDisc.omega;
+
+            // PHYSICS ENGINE: Numerical Integration of Frictional Torque
+            const dx = smallDisc.x - largeDisc.x;
+            const dy = smallDisc.y - largeDisc.y;
+            const dist = Math.hypot(dx, dy);
+
+            // Check if small disc is on the large disc
+            if (dist < largeDisc.r && !smallDisc.isDragging) {
+                let totalTorque = 0;
+                const mass = 1.0; 
+                const g = 9.8; 
+                // Scaling factor to make visual speed match frame rate physics smoothly
+                const timeStepScale = 0.005; 
+                const dN = (mass * g) / integrationPoints.length;
+                const momentOfInertia = 0.5 * mass * smallDisc.r * smallDisc.r;
+
+                // Integrate over the area of the small disc
+                for (let i = 0; i < integrationPoints.length; i++) {
+                    const p = integrationPoints[i];
+                    
+                    // Velocity of the point on the large disc below it
+                    const rx = dx + p.x;
+                    const ry = dy + p.y;
+                    const vl_x = -largeDisc.omega * ry;
+                    const vl_y = largeDisc.omega * rx;
+
+                    // Velocity of the point on the small disc
+                    const vs_x = -smallDisc.omega * p.y;
+                    const vs_y = smallDisc.omega * p.x;
+
+                    // Relative velocity (slipping)
+                    const vrel_x = vs_x - vl_x;
+                    const vrel_y = vs_y - vl_y;
+                    const vrel_mag = Math.hypot(vrel_x, vrel_y);
+
+                    if (vrel_mag > 0.0001) {
+                        // Friction force opposes relative velocity
+                        const fx = -frictionMu * dN * (vrel_x / vrel_mag);
+                        const fy = -frictionMu * dN * (vrel_y / vrel_mag);
+                        
+                        // Torque contribution from this element: cross product r x F
+                        totalTorque += (p.x * fy - p.y * fx);
+                    }
+                }
+                
+                // alpha = Tau / I
+                const angularAccel = totalTorque / momentOfInertia;
+                smallDisc.omega += angularAccel * timeStepScale;
+
+            } else if (!smallDisc.isDragging) {
+                // Decay due to axis friction when off the table
+                smallDisc.omega *= 0.95; 
+                if (Math.abs(smallDisc.omega) < 0.0001) smallDisc.omega = 0;
+            }
+
+            smallDisc.angle += smallDisc.omega;
+
+            // Record history for graph
+            history.push({ small: smallDisc.omega, large: largeDisc.omega });
+            if (history.length > maxHistory) history.shift();
+
+            // Render Updates
+            document.getElementById('statsDisplay').innerHTML = 
+                `&omega; (Small): ${smallDisc.omega.toFixed(4).padStart(7, ' ')} &nbsp;|&nbsp; ` +
+                `&Omega; (Large): ${largeDisc.omega.toFixed(4).padStart(7, ' ')}`;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Grid
+            ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < canvas.width; i += 40) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke(); }
+            for (let i = 0; i < canvas.height; i += 40) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke(); }
+
+            drawDisc(ctx, largeDisc.x, largeDisc.y, largeDisc.r, largeDisc.angle, largeDisc.color1, largeDisc.color2, true);
+            drawDisc(ctx, smallDisc.x, smallDisc.y, smallDisc.r, smallDisc.angle, smallDisc.color1, smallDisc.color2, false);
+            drawGraph();
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
